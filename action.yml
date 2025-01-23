@@ -1,0 +1,117 @@
+name: Aikido release gate
+
+inputs:
+  aikido_ci_token:
+    required: true
+  github_token:
+    required: true
+  no_fail_on_dependency_scan:
+    required: false
+    description: "Don't fail when scanning depedencies."
+    type: boolean
+    default: false
+  fail_on_sast_scan:
+    required: false
+    description: "Let Aikido fail when new static code analysis issues have been detected."
+    type: boolean
+    default: false
+  fail_on_iac_scan:
+    required: false
+    description: "Let Aikido fail when new infrastructure as code issues have been detected."
+    type: boolean
+    default: false
+  fail_on_secrets_scan:
+    required: false
+    description: "Let Aikido fail when new exposed secrets have been detected."
+    type: boolean
+    default: false
+  minimum_severity_level:
+    required: false
+    description: "Set the minimum severity level. Accepted options are: LOW, MEDIUM, HIGH and CRITICAL."
+    type: choice
+    options:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+  poll_interval:
+    required: false
+    description: "The poll interval when checking for an updated scan result (preset: 10)"
+    type: int
+
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create the status check
+      uses: guibranco/github-status-action-v2@v1
+      with:
+        authToken: ${{ inputs.github_token }}
+        context: 'Aikido release gate'
+        description: Running Aikido checks before release
+        state: pending
+        sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup node
+      uses: actions/setup-node@v4
+
+    - name: Install Aikido cli tool
+      shell: bash
+      run: npm install -g @aikidosec/ci-api-client
+
+    - name: Set the Aikido API key
+      shell: bash
+      run: aikido-api-client apikey ${{ inputs.aikido_ci_token }}
+
+    - name: Aikido release gate scan
+      shell: bash
+      run: |
+        aikido-api-client scan-release \
+          ${{ github.event.repository.name }} \
+          ${{ github.event.pull_request.head.sha || github.sha }} \
+          ${{ inputs.no_fail_on_dependency_scan && '--no-fail-on-dependency-scan' || '' }} \
+          ${{ inputs.fail_on_sast_scan && '--fail-on-sast-scan' || '' }} \
+          ${{ inputs.fail_on_iac_scan && '--fail-on-iac-scan' || '' }} \
+          ${{ inputs.fail_on_secrets_scan && '--fail-on-secrets-scan' || '' }} \
+          ${{ inputs.minimum_severity_level && format('--minimum-severity-level {0}', inputs.minimum_severity_level) || '' }} \
+          ${{ inputs.poll_interval && format('--poll-interval {0}', inputs.poll_interval) || '' }} > output.txt 2>&1
+
+    - name: Capture aikido release gate scan output
+      if: ${{ success() || failure() }}
+      id: aikido-release-gate
+      shell: bash
+      run: |
+        {
+          echo "output<<EOF"
+          cat output.txt | grep -iE '(open issues|scan complete)'
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+        {
+          echo "url<<EOF"
+          cat output.txt | grep -o 'http[s]\?://[^ ]\+' | head -1
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+
+    - name: Update the status check (success)
+      uses: guibranco/github-status-action-v2@v1
+      with:
+        authToken: ${{ inputs.github_token }}
+        context: 'Aikido release gate'
+        description: ${{ steps.aikido-release-gate.outputs.output }}
+        state: success
+        sha: ${{ github.event.pull_request.head.sha || github.sha }}
+        target_url: ${{ steps.aikido-release-gate.outputs.url }}
+
+    - name: Update the status check (failure)
+      uses: guibranco/github-status-action-v2@v1
+      if: ${{ failure() }}
+      with:
+        authToken: ${{ inputs.github_token }}
+        context: 'Aikido release gate'
+        description: ${{ steps.aikido-release-gate.outputs.output }}
+        state: failure
+        sha: ${{ github.event.pull_request.head.sha || github.sha }}
+        target_url: ${{ steps.aikido-release-gate.outputs.url }}
